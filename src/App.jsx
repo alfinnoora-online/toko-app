@@ -144,12 +144,20 @@ function AuthScreen({onLogin}) {
   const handleLogin = async()=>{
     if(!form.username||!form.password) return setError("Username dan password wajib diisi");
     setLoading(true);
-    const accounts=await cloudGet("toko-accounts")||{};
-    const acc=accounts[form.username.toLowerCase()];
-    if(!acc){setLoading(false);return setError("Akun tidak ditemukan");}
+    // Retry sampai 3x jika cloud gagal diakses
+    let accounts = null;
+    for(let i=0; i<3; i++){
+      accounts = await cloudGet("toko-accounts");
+      if(accounts) break;
+      await new Promise(r=>setTimeout(r,800));
+    }
+    if(!accounts){setLoading(false);return setError("Gagal terhubung ke server. Periksa koneksi internet dan coba lagi.");}
+    const key=form.username.toLowerCase();
+    const acc=accounts[key];
+    if(!acc){setLoading(false);return setError("Akun tidak ditemukan. Pastikan username benar.");}
     const hash=await hashPassword(form.password);
-    if(hash!==acc.passwordHash){setLoading(false);return setError("Password salah");}
-    const u={username:form.username.toLowerCase(),namaToko:acc.namaToko};
+    if(hash!==acc.passwordHash){setLoading(false);return setError("Password salah.");}
+    const u={username:key,namaToko:acc.namaToko};
     setSession(u); onLogin(u); setLoading(false);
   };
 
@@ -159,12 +167,20 @@ function AuthScreen({onLogin}) {
     if(form.password.length<6) return setError("Password minimal 6 karakter");
     if(!/^[a-zA-Z0-9_]+$/.test(form.username)) return setError("Username hanya huruf, angka, dan _");
     setLoading(true);
-    const accounts=await cloudGet("toko-accounts")||{};
-    if(accounts[form.username.toLowerCase()]){setLoading(false);return setError("Username sudah dipakai");}
+    let accounts = null;
+    for(let i=0; i<3; i++){
+      accounts = await cloudGet("toko-accounts");
+      if(accounts !== null) break;
+      await new Promise(r=>setTimeout(r,800));
+    }
+    accounts = accounts || {};
+    const key=form.username.toLowerCase();
+    if(accounts[key]){setLoading(false);return setError("Username sudah dipakai, coba username lain.");}
     const hash=await hashPassword(form.password);
-    accounts[form.username.toLowerCase()]={passwordHash:hash,namaToko:form.namaToko,createdAt:new Date().toISOString()};
-    await cloudSet("toko-accounts",accounts);
-    const u={username:form.username.toLowerCase(),namaToko:form.namaToko};
+    accounts[key]={passwordHash:hash,namaToko:form.namaToko,createdAt:new Date().toISOString()};
+    const ok=await cloudSet("toko-accounts",accounts);
+    if(!ok){setLoading(false);return setError("Gagal menyimpan akun. Periksa koneksi internet.");}
+    const u={username:key,namaToko:form.namaToko};
     setSession(u); onLogin(u); setLoading(false);
   };
 
