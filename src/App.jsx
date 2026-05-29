@@ -1,18 +1,65 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STORAGE & AUTH
+// SUPABASE CONFIG
 // ═══════════════════════════════════════════════════════════════════════════════
+const SB_URL = "https://olvccushxrdcegxltmxc.supabase.co";
+const SB_KEY = "sb_publishable_D74fQBpyX1lc-G8-HBAvqw_ga8g0o9l";
+const sbHeaders = {
+  "Content-Type": "application/json",
+  "apikey": SB_KEY,
+  "Authorization": `Bearer ${SB_KEY}`,
+};
+
+// ── Supabase helpers ──────────────────────────────────────────────────────────
+async function sbGet(table, filter="") {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${filter}`, { headers: sbHeaders });
+    if(!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function sbUpsert(table, data) {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: { ...sbHeaders, "Prefer": "resolution=merge-duplicates" },
+      body: JSON.stringify(data),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+async function sbDelete(table, filter) {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${filter}`, {
+      method: "DELETE", headers: sbHeaders,
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
 async function hashPassword(password) {
   const data = new TextEncoder().encode(password + "toku-salt-2024");
   const buf  = await crypto.subtle.digest("SHA-256", data);
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
 }
-async function cloudGet(key) {
-  try { const r = await window.storage.get(key,true); return r?JSON.parse(r.value):null; } catch{return null;}
+
+// ── Ops log cloud helpers ─────────────────────────────────────────────────────
+async function cloudGetOps(username) {
+  const rows = await sbGet("ops_log", `username=eq.${username}&order=ts.asc`);
+  return rows || [];
 }
-async function cloudSet(key,val) {
-  try { await window.storage.set(key,JSON.stringify(val),true); return true; } catch{return false;}
+
+async function cloudPushOps(ops) {
+  if(!ops.length) return true;
+  const rows = ops.map(op=>({
+    id: op.id, username: op.username, device_id: op.deviceId,
+    ts: op.ts, type: op.type, payload: op.payload,
+  }));
+  return await sbUpsert("ops_log", rows);
 }
 function localLoad(u)    { try{const r=localStorage.getItem(`toko-local-${u}`);return r?JSON.parse(r):null;}catch{return null;} }
 function localSave(u,s)  { try{localStorage.setItem(`toko-local-${u}`,JSON.stringify(s));}catch{} }
@@ -144,20 +191,13 @@ function AuthScreen({onLogin}) {
   const handleLogin = async()=>{
     if(!form.username||!form.password) return setError("Username dan password wajib diisi");
     setLoading(true);
-    // Retry sampai 3x jika cloud gagal diakses
-    let accounts = null;
-    for(let i=0; i<3; i++){
-      accounts = await cloudGet("toko-accounts");
-      if(accounts) break;
-      await new Promise(r=>setTimeout(r,800));
-    }
-    if(!accounts){setLoading(false);return setError("Gagal terhubung ke server. Periksa koneksi internet dan coba lagi.");}
     const key=form.username.toLowerCase();
-    const acc=accounts[key];
-    if(!acc){setLoading(false);return setError("Akun tidak ditemukan. Pastikan username benar.");}
+    const rows=await sbGet("accounts",`username=eq.${key}`);
+    if(!rows||rows.length===0){setLoading(false);return setError("Akun tidak ditemukan. Pastikan username benar.");}
+    const acc=rows[0];
     const hash=await hashPassword(form.password);
-    if(hash!==acc.passwordHash){setLoading(false);return setError("Password salah.");}
-    const u={username:key,namaToko:acc.namaToko};
+    if(hash!==acc.password_hash){setLoading(false);return setError("Password salah.");}
+    const u={username:key,namaToko:acc.nama_toko};
     setSession(u); onLogin(u); setLoading(false);
   };
 
@@ -167,18 +207,11 @@ function AuthScreen({onLogin}) {
     if(form.password.length<6) return setError("Password minimal 6 karakter");
     if(!/^[a-zA-Z0-9_]+$/.test(form.username)) return setError("Username hanya huruf, angka, dan _");
     setLoading(true);
-    let accounts = null;
-    for(let i=0; i<3; i++){
-      accounts = await cloudGet("toko-accounts");
-      if(accounts !== null) break;
-      await new Promise(r=>setTimeout(r,800));
-    }
-    accounts = accounts || {};
     const key=form.username.toLowerCase();
-    if(accounts[key]){setLoading(false);return setError("Username sudah dipakai, coba username lain.");}
+    const existing=await sbGet("accounts",`username=eq.${key}`);
+    if(existing&&existing.length>0){setLoading(false);return setError("Username sudah dipakai, coba username lain.");}
     const hash=await hashPassword(form.password);
-    accounts[key]={passwordHash:hash,namaToko:form.namaToko,createdAt:new Date().toISOString()};
-    const ok=await cloudSet("toko-accounts",accounts);
+    const ok=await sbUpsert("accounts",[{username:key,password_hash:hash,nama_toko:form.namaToko}]);
     if(!ok){setLoading(false);return setError("Gagal menyimpan akun. Periksa koneksi internet.");}
     const u={username:key,namaToko:form.namaToko};
     setSession(u); onLogin(u); setLoading(false);
@@ -266,19 +299,16 @@ function MainApp({user,onLogout}) {
   const [pendingOps,setPendingOps] = useState([]);
   const [showLogout,setShowLogout] = useState(false);
   const pendingRef = useRef([]);
-  const OPS_KEY = `toko-ops-${user.username}`;
 
   useEffect(()=>{
     async function init() {
       const local = localLoad(user.username);
-      // Pastikan semua field ada meski data lama tidak punya pelanggan
       let base = {
-        produk: [], transaksi: [], pelanggan: [], appliedOpIds: [],
-        ...(local || {}),
-        pelanggan: local?.pelanggan || [],
+        produk:[], transaksi:[], pelanggan:[], appliedOpIds:[],
+        ...(local||{}), pelanggan:local?.pelanggan||[],
       };
       if(navigator.onLine){
-        const cloudOps=await cloudGet(OPS_KEY)||[];
+        const cloudOps=await cloudGetOps(user.username);
         base=applyOps(base,cloudOps);
         localSave(user.username,base);
       }
@@ -291,14 +321,22 @@ function MainApp({user,onLogout}) {
     const onOnline=async()=>{
       setOnline(true);
       const pending=pendingRef.current;
-      setSyncStatus("syncing");
-      const cloudOps=await cloudGet(OPS_KEY)||[];
-      const merged=[...cloudOps,...pending].filter((op,i,arr)=>arr.findIndex(x=>x.id===op.id)===i);
-      const ok=await cloudSet(OPS_KEY,merged);
-      if(ok){
+      if(!pending.length) {
+        // Pull saja update dari perangkat lain
+        const cloudOps=await cloudGetOps(user.username);
         const ls=localLoad(user.username);
         const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...(ls||{}),pelanggan:ls?.pelanggan||[]};
-        const ns=applyOps(lsBase,merged);
+        const ns=applyOps(lsBase,cloudOps);
+        localSave(user.username,ns); setState(ns);
+        return;
+      }
+      setSyncStatus("syncing");
+      const ok=await cloudPushOps(pending);
+      if(ok){
+        const cloudOps=await cloudGetOps(user.username);
+        const ls=localLoad(user.username);
+        const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...(ls||{}),pelanggan:ls?.pelanggan||[]};
+        const ns=applyOps(lsBase,cloudOps);
         localSave(user.username,ns); setState(ns);
         setPendingOps([]); pendingRef.current=[];
         localStorage.setItem(`toko-pending-${user.username}`,"[]");
@@ -314,12 +352,12 @@ function MainApp({user,onLogout}) {
   useEffect(()=>{
     const iv=setInterval(async()=>{
       if(!navigator.onLine||pendingRef.current.length>0) return;
-      const cloudOps=await cloudGet(OPS_KEY)||[];
+      const cloudOps=await cloudGetOps(user.username);
       const ls=localLoad(user.username);
       if(!ls) return;
       const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...ls,pelanggan:ls.pelanggan||[]};
       const ns=applyOps(lsBase,cloudOps);
-      if(ns.appliedOpIds.length!==ls.appliedOpIds.length){
+      if(ns.appliedOpIds.length!==lsBase.appliedOpIds.length){
         localSave(user.username,ns); setState(ns);
         setSyncStatus("synced"); setTimeout(()=>setSyncStatus("idle"),2000);
       }
@@ -332,13 +370,12 @@ function MainApp({user,onLogout}) {
     setState(prev=>{const next=applyOps(prev,[op]);localSave(user.username,next);return next;});
     if(navigator.onLine){
       setSyncStatus("syncing");
-      const cloudOps=await cloudGet(OPS_KEY)||[];
-      const merged=[...cloudOps,op].filter((o,i,arr)=>arr.findIndex(x=>x.id===o.id)===i);
+      await cloudPushOps([op]);
+      const cloudOps=await cloudGetOps(user.username);
       const ls=localLoad(user.username);
       const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...(ls||{}),pelanggan:ls?.pelanggan||[]};
-      const ns=applyOps(lsBase,merged);
+      const ns=applyOps(lsBase,cloudOps);
       localSave(user.username,ns); setState(ns);
-      await cloudSet(OPS_KEY,merged);
       setSyncStatus("synced"); setTimeout(()=>setSyncStatus("idle"),2000);
     } else {
       const np=[...pendingRef.current,op];
