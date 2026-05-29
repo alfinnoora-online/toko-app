@@ -255,7 +255,12 @@ function MainApp({user,onLogout}) {
   useEffect(()=>{
     async function init() {
       const local = localLoad(user.username);
-      let base = local||{produk:[],transaksi:[],pelanggan:[],appliedOpIds:[]};
+      // Pastikan semua field ada meski data lama tidak punya pelanggan
+      let base = {
+        produk: [], transaksi: [], pelanggan: [], appliedOpIds: [],
+        ...(local || {}),
+        pelanggan: local?.pelanggan || [],
+      };
       if(navigator.onLine){
         const cloudOps=await cloudGet(OPS_KEY)||[];
         base=applyOps(base,cloudOps);
@@ -276,7 +281,8 @@ function MainApp({user,onLogout}) {
       const ok=await cloudSet(OPS_KEY,merged);
       if(ok){
         const ls=localLoad(user.username);
-        const ns=applyOps(ls||{produk:[],transaksi:[],pelanggan:[],appliedOpIds:[]},merged);
+        const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...(ls||{}),pelanggan:ls?.pelanggan||[]};
+        const ns=applyOps(lsBase,merged);
         localSave(user.username,ns); setState(ns);
         setPendingOps([]); pendingRef.current=[];
         localStorage.setItem(`toko-pending-${user.username}`,"[]");
@@ -295,7 +301,8 @@ function MainApp({user,onLogout}) {
       const cloudOps=await cloudGet(OPS_KEY)||[];
       const ls=localLoad(user.username);
       if(!ls) return;
-      const ns=applyOps(ls,cloudOps);
+      const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...ls,pelanggan:ls.pelanggan||[]};
+      const ns=applyOps(lsBase,cloudOps);
       if(ns.appliedOpIds.length!==ls.appliedOpIds.length){
         localSave(user.username,ns); setState(ns);
         setSyncStatus("synced"); setTimeout(()=>setSyncStatus("idle"),2000);
@@ -312,7 +319,8 @@ function MainApp({user,onLogout}) {
       const cloudOps=await cloudGet(OPS_KEY)||[];
       const merged=[...cloudOps,op].filter((o,i,arr)=>arr.findIndex(x=>x.id===o.id)===i);
       const ls=localLoad(user.username);
-      const ns=applyOps(ls,merged);
+      const lsBase={produk:[],transaksi:[],pelanggan:[],appliedOpIds:[],...(ls||{}),pelanggan:ls?.pelanggan||[]};
+      const ns=applyOps(lsBase,merged);
       localSave(user.username,ns); setState(ns);
       await cloudSet(OPS_KEY,merged);
       setSyncStatus("synced"); setTimeout(()=>setSyncStatus("idle"),2000);
