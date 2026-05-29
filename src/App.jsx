@@ -979,4 +979,19 @@ function Laporan({state}) {
         {filtered.length===0
           ? <div style={{padding:24,textAlign:"center",color:"#4a5568",fontSize:13}}>Belum ada transaksi</div>
           : filtered.map(t=>(
-            <div key={t.id} style={{padding:"10px 14px",borderBottom:"1p
+            <div key={t.id} style={{padding:"10px 14px",borderBottom:"1px solid #0f1117"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <div>
+                  <span style={{fontSize:11,color:"#4a5568"}}>{fmtDate(t.tanggal)}</span>
+                  {t.pelangganNama&&<span style={{fontSize:10,color:"#ce93d8",marginLeft:6}}>👤 {t.pelangganNama}</span>}
+                </div>
+                <span style={{fontWeight:700,color:"#52b788",fontSize:13}}>{fmt(t.total)}</span>
+              </div>
+              <div style={{fontSize:11,color:"#8a9ba8"}}>{t.items.map(i=>`${i.nama} x${i.qty}`).join(" · ")}</div>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
